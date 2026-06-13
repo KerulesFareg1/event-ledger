@@ -14,6 +14,9 @@ import com.eventledger.account.api.ApplyTransactionResult;
 import com.eventledger.account.api.BalanceResponse;
 import com.eventledger.account.api.TransactionResponse;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -32,21 +35,33 @@ public class AccountTransactionService {
     private final AccountTransactionRepository repository;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final Counter appliedTransactions;
+    private final Counter duplicateTransactions;
 
     @Autowired
     public AccountTransactionService(
             AccountTransactionRepository repository,
-            ObjectMapper objectMapper) {
-        this(repository, objectMapper, Clock.systemUTC());
+            ObjectMapper objectMapper,
+            MeterRegistry meterRegistry) {
+        this(repository, objectMapper, Clock.systemUTC(), meterRegistry);
     }
 
     AccountTransactionService(
             AccountTransactionRepository repository,
             ObjectMapper objectMapper,
-            Clock clock) {
+            Clock clock,
+            MeterRegistry meterRegistry) {
         this.repository = repository;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.appliedTransactions = Counter.builder("event_ledger_account_transactions")
+                .description("Transactions processed by Account Service")
+                .tag("outcome", "applied")
+                .register(meterRegistry);
+        this.duplicateTransactions = Counter.builder("event_ledger_account_transactions")
+                .description("Transactions processed by Account Service")
+                .tag("outcome", "duplicate")
+                .register(meterRegistry);
     }
 
     @Transactional
@@ -57,6 +72,7 @@ public class AccountTransactionService {
                 throw new EventAccountConflictException(
                         request.eventId(), existing.getAccountId(), accountId);
             }
+            duplicateTransactions.increment();
             return new ApplyTransactionResult(toResponse(existing), true);
         }
 
@@ -77,7 +93,9 @@ public class AccountTransactionService {
                 serializeMetadata(request.metadata()),
                 Instant.now(clock));
 
-        return new ApplyTransactionResult(toResponse(repository.saveAndFlush(transaction)), false);
+        AccountTransaction savedTransaction = repository.saveAndFlush(transaction);
+        appliedTransactions.increment();
+        return new ApplyTransactionResult(toResponse(savedTransaction), false);
     }
 
     @Transactional(readOnly = true)

@@ -1,6 +1,8 @@
 package com.eventledger.gateway.health;
 
+import java.lang.management.ManagementFactory;
 import java.sql.Connection;
+import java.time.Duration;
 import java.util.Map;
 
 import javax.sql.DataSource;
@@ -20,19 +22,26 @@ public class HealthController {
     }
 
     @GetMapping("/health")
-    public ResponseEntity<Map<String, String>> health() {
+    public ResponseEntity<Map<String, Object>> health() {
         try (Connection connection = dataSource.getConnection()) {
             boolean databaseHealthy = connection.isValid(1);
             HttpStatus status = databaseHealthy ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE;
             return ResponseEntity.status(status).body(Map.of(
                     "status", databaseHealthy ? "UP" : "DOWN",
                     "service", "event-gateway",
-                    "database", databaseHealthy ? "UP" : "DOWN"));
+                    "database", Map.of(
+                            "status", databaseHealthy ? "UP" : "DOWN",
+                            "product", connection.getMetaData().getDatabaseProductName(),
+                            "version", connection.getMetaData().getDatabaseProductVersion()),
+                    "uptimeSeconds", Duration.ofMillis(
+                            ManagementFactory.getRuntimeMXBean().getUptime()).toSeconds()));
         } catch (Exception exception) {
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(Map.of(
                     "status", "DOWN",
                     "service", "event-gateway",
-                    "database", "DOWN"));
+                    "database", Map.of("status", "DOWN"),
+                    "uptimeSeconds", Duration.ofMillis(
+                            ManagementFactory.getRuntimeMXBean().getUptime()).toSeconds()));
         }
     }
 }

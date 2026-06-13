@@ -12,6 +12,9 @@ import com.eventledger.gateway.api.SubmitEventRequest;
 import com.eventledger.gateway.api.SubmitEventResult;
 import com.eventledger.gateway.client.AccountServiceClient;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -30,30 +33,43 @@ public class LedgerEventService {
     private final AccountServiceClient accountServiceClient;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final Counter acceptedEvents;
+    private final Counter duplicateEvents;
 
     @Autowired
     public LedgerEventService(
             LedgerEventRepository repository,
             AccountServiceClient accountServiceClient,
-            ObjectMapper objectMapper) {
-        this(repository, accountServiceClient, objectMapper, Clock.systemUTC());
+            ObjectMapper objectMapper,
+            MeterRegistry meterRegistry) {
+        this(repository, accountServiceClient, objectMapper, Clock.systemUTC(), meterRegistry);
     }
 
     LedgerEventService(
             LedgerEventRepository repository,
             AccountServiceClient accountServiceClient,
             ObjectMapper objectMapper,
-            Clock clock) {
+            Clock clock,
+            MeterRegistry meterRegistry) {
         this.repository = repository;
         this.accountServiceClient = accountServiceClient;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.acceptedEvents = Counter.builder("event_ledger_gateway_submissions")
+                .description("Event submissions processed by the Gateway")
+                .tag("outcome", "accepted")
+                .register(meterRegistry);
+        this.duplicateEvents = Counter.builder("event_ledger_gateway_submissions")
+                .description("Event submissions processed by the Gateway")
+                .tag("outcome", "duplicate")
+                .register(meterRegistry);
     }
 
     @Transactional
     public synchronized SubmitEventResult submit(SubmitEventRequest request) {
         LedgerEvent existing = repository.findById(request.eventId()).orElse(null);
         if (existing != null) {
+            duplicateEvents.increment();
             return new SubmitEventResult(toResponse(existing), true);
         }
 
@@ -69,7 +85,9 @@ public class LedgerEventService {
                 serializeMetadata(request.metadata()),
                 Instant.now(clock));
 
-        return new SubmitEventResult(toResponse(repository.saveAndFlush(event)), false);
+        LedgerEvent savedEvent = repository.saveAndFlush(event);
+        acceptedEvents.increment();
+        return new SubmitEventResult(toResponse(savedEvent), false);
     }
 
     @Transactional(readOnly = true)

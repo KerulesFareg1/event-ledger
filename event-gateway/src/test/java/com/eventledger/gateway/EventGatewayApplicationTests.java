@@ -6,6 +6,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -18,6 +19,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import com.eventledger.gateway.event.LedgerEventRepository;
+import com.eventledger.gateway.trace.TraceContext;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -73,12 +75,17 @@ class EventGatewayApplicationTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status", is("UP")))
                 .andExpect(jsonPath("$.service", is("event-gateway")))
-                .andExpect(jsonPath("$.database", is("UP")));
+                .andExpect(jsonPath("$.database.status", is("UP")))
+                .andExpect(jsonPath("$.database.product", is("H2")))
+                .andExpect(jsonPath("$.uptimeSeconds").isNumber());
     }
 
     @Test
     void submitsStoresAndForwardsAnEventToAccountService() throws Exception {
-        submitEvent("""
+        mockMvc.perform(post("/events")
+                .header(TraceContext.HEADER_NAME, "trace-client-001")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
                 {
                   "eventId": "evt-001",
                   "accountId": "acct-123",
@@ -91,14 +98,16 @@ class EventGatewayApplicationTests {
                     "batchId": "B-9042"
                   }
                 }
-                """)
+                """))
                 .andExpect(status().isCreated())
+                .andExpect(header().string(TraceContext.HEADER_NAME, "trace-client-001"))
                 .andExpect(jsonPath("$.eventId", is("evt-001")))
                 .andExpect(jsonPath("$.metadata.batchId", is("B-9042")));
 
         assertThat(ACCOUNT_SERVICE.requestCount()).isEqualTo(1);
         assertThat(ACCOUNT_SERVICE.lastPath())
                 .isEqualTo("/accounts/acct-123/transactions");
+        assertThat(ACCOUNT_SERVICE.lastTraceId()).isEqualTo("trace-client-001");
 
         Map<String, Object> forwardedBody = objectMapper.readValue(
                 ACCOUNT_SERVICE.lastBody(),
@@ -114,6 +123,18 @@ class EventGatewayApplicationTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.accountId", is("acct-123")))
                 .andExpect(jsonPath("$.amount", is(150.0)));
+    }
+
+    @Test
+    void generatesAndReturnsTraceIdWhenClientDoesNotSupplyOne() throws Exception {
+        String traceId = mockMvc.perform(get("/events").param("account", "acct-empty"))
+                .andExpect(status().isOk())
+                .andExpect(header().exists(TraceContext.HEADER_NAME))
+                .andReturn()
+                .getResponse()
+                .getHeader(TraceContext.HEADER_NAME);
+
+        assertThat(traceId).matches("[a-f0-9]{32}");
     }
 
     @Test
@@ -249,6 +270,25 @@ class EventGatewayApplicationTests {
                 .andExpect(jsonPath("$.message", is("Query parameter 'account' is required")));
     }
 
+    @Test
+    void exposesActuatorHealthAndCustomSubmissionMetric() throws Exception {
+        submitEvent(event(
+                "evt-metric", "acct-metric", "CREDIT", "10.00",
+                "2026-05-15T12:00:00Z"))
+                .andExpect(status().isCreated());
+
+        mockMvc.perform(get("/actuator/health"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status", is("UP")))
+                .andExpect(jsonPath("$.components.db.status", is("UP")));
+
+        mockMvc.perform(get("/actuator/metrics/event_ledger_gateway_submissions")
+                        .param("tag", "outcome:accepted"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.name", is("event_ledger_gateway_submissions")))
+                .andExpect(jsonPath("$.measurements[0].value").isNumber());
+    }
+
     private ResultActions submitEvent(String body) throws Exception {
         return mockMvc.perform(post("/events")
                 .contentType(MediaType.APPLICATION_JSON)
@@ -279,6 +319,7 @@ class EventGatewayApplicationTests {
         private final AtomicInteger requestCount = new AtomicInteger();
         private final List<String> bodies = new ArrayList<>();
         private volatile String lastPath;
+        private volatile String lastTraceId;
         private volatile int nextStatus = 201;
         private volatile String nextResponse = "{}";
 
@@ -306,6 +347,7 @@ class EventGatewayApplicationTests {
             requestCount.set(0);
             bodies.clear();
             lastPath = null;
+            lastTraceId = null;
             nextStatus = 201;
             nextResponse = "{}";
         }
@@ -323,6 +365,10 @@ class EventGatewayApplicationTests {
             return lastPath;
         }
 
+        String lastTraceId() {
+            return lastTraceId;
+        }
+
         synchronized String lastBody() {
             return bodies.getLast();
         }
@@ -334,6 +380,7 @@ class EventGatewayApplicationTests {
         private synchronized void handle(HttpExchange exchange) throws IOException {
             requestCount.incrementAndGet();
             lastPath = exchange.getRequestURI().getPath();
+            lastTraceId = exchange.getRequestHeaders().getFirst(TraceContext.HEADER_NAME);
             bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
 
             byte[] response = nextResponse.getBytes(StandardCharsets.UTF_8);

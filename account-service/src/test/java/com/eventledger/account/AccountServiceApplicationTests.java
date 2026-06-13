@@ -5,10 +5,12 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.eventledger.account.transaction.AccountTransactionRepository;
+import com.eventledger.account.trace.TraceContext;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -39,7 +41,9 @@ class AccountServiceApplicationTests {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status", is("UP")))
                 .andExpect(jsonPath("$.service", is("account-service")))
-                .andExpect(jsonPath("$.database", is("UP")));
+                .andExpect(jsonPath("$.database.status", is("UP")))
+                .andExpect(jsonPath("$.database.product", is("H2")))
+                .andExpect(jsonPath("$.uptimeSeconds").isNumber());
     }
 
     @Test
@@ -185,6 +189,28 @@ class AccountServiceApplicationTests {
         mockMvc.perform(get("/accounts/missing-account/balance"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.message", is("Account 'missing-account' was not found")));
+    }
+
+    @Test
+    void preservesTraceIdAndExposesActuatorMetrics() throws Exception {
+        mockMvc.perform(post("/accounts/{accountId}/transactions", "acct-trace")
+                        .header(TraceContext.HEADER_NAME, "trace-gateway-001")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(transaction(
+                                "evt-trace", "CREDIT", "10.00",
+                                "2026-05-15T12:00:00Z")))
+                .andExpect(status().isCreated())
+                .andExpect(header().string(TraceContext.HEADER_NAME, "trace-gateway-001"));
+
+        mockMvc.perform(get("/actuator/health"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.components.db.status", is("UP")));
+
+        mockMvc.perform(get("/actuator/metrics/event_ledger_account_transactions")
+                        .param("tag", "outcome:applied"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.name", is("event_ledger_account_transactions")))
+                .andExpect(jsonPath("$.measurements[0].value").isNumber());
     }
 
     private org.springframework.test.web.servlet.ResultActions applyTransaction(

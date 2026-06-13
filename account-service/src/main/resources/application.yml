@@ -14,5 +14,23 @@ spring:
       ddl-auto: validate
     open-in-view: false
 
+logging:
+  structured:
+    format:
+      console: logstash
+    json:
+      add:
+        service: account-service
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics
+  endpoint:
+    health:
+      show-components: always
+      show-details: always
+
 server:
   port: 8081

@@ -17,5 +17,23 @@ spring:
 account-service:
   base-url: ${ACCOUNT_SERVICE_BASE_URL:http://localhost:8081}
 
+logging:
+  structured:
+    format:
+      console: logstash
+    json:
+      add:
+        service: event-gateway
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics
+  endpoint:
+    health:
+      show-components: always
+      show-details: always
+
 server:
   port: 8080

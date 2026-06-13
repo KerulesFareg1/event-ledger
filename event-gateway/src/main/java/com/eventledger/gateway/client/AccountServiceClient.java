@@ -3,6 +3,7 @@ package com.eventledger.gateway.client;
 import java.util.Map;
 
 import com.eventledger.gateway.api.SubmitEventRequest;
+import com.eventledger.gateway.trace.TraceContext;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
@@ -44,6 +45,7 @@ public class AccountServiceClient {
             restClient.post()
                     .uri("/accounts/{accountId}/transactions", event.accountId())
                     .contentType(MediaType.APPLICATION_JSON)
+                    .header(TraceContext.HEADER_NAME, TraceContext.currentTraceId())
                     .body(request)
                     .retrieve()
                     .toBodilessEntity();
