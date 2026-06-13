@@ -56,6 +56,10 @@ class EventGatewayApplicationTests {
     @DynamicPropertySource
     static void accountServiceProperties(DynamicPropertyRegistry registry) {
         registry.add("account-service.base-url", ACCOUNT_SERVICE::baseUrl);
+        registry.add("account-service.resilience.connect-timeout", () -> "100ms");
+        registry.add("account-service.resilience.read-timeout", () -> "250ms");
+        registry.add("account-service.resilience.max-attempts", () -> "3");
+        registry.add("account-service.resilience.initial-backoff", () -> "5ms");
     }
 
     @BeforeEach
@@ -251,9 +255,97 @@ class EventGatewayApplicationTests {
                         "$.message",
                         is("Account 'acct-123' uses currency USD; received EUR")));
 
+        assertThat(ACCOUNT_SERVICE.requestCount()).isEqualTo(1);
         assertThat(repository.existsById("evt-rejected")).isFalse();
         mockMvc.perform(get("/events/evt-rejected"))
                 .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void retriesTransientAccountServiceFailuresAndEventuallyStoresTheEvent() throws Exception {
+        ACCOUNT_SERVICE.failNext(2, 503, """
+                {
+                  "message": "Account Service is warming up"
+                }
+                """);
+
+        submitEvent(event(
+                "evt-retry", "acct-retry", "CREDIT", "15.00",
+                "2026-05-15T12:00:00Z"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.eventId", is("evt-retry")));
+
+        assertThat(ACCOUNT_SERVICE.requestCount()).isEqualTo(3);
+        assertThat(repository.existsById("evt-retry")).isTrue();
+    }
+
+    @Test
+    void returnsServiceUnavailableAfterRetriesWhileLocalEventReadsStillWork() throws Exception {
+        submitEvent(event(
+                "evt-existing", "acct-degraded", "CREDIT", "20.00",
+                "2026-05-15T11:00:00Z"))
+                .andExpect(status().isCreated());
+        ACCOUNT_SERVICE.reset();
+        ACCOUNT_SERVICE.failNext(3, 503, """
+                {
+                  "message": "Account Service is unavailable"
+                }
+                """);
+
+        submitEvent(event(
+                "evt-unavailable", "acct-degraded", "DEBIT", "5.00",
+                "2026-05-15T12:00:00Z"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath(
+                        "$.message",
+                        is("Account Service is temporarily unavailable")));
+
+        assertThat(ACCOUNT_SERVICE.requestCount()).isEqualTo(3);
+        assertThat(repository.existsById("evt-unavailable")).isFalse();
+
+        mockMvc.perform(get("/events/evt-existing"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.eventId", is("evt-existing")));
+        mockMvc.perform(get("/events").param("account", "acct-degraded"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(1)))
+                .andExpect(jsonPath("$[0].eventId", is("evt-existing")));
+    }
+
+    @Test
+    void proxiesBalanceAndReturnsServiceUnavailableWhenAccountServiceFails() throws Exception {
+        ACCOUNT_SERVICE.respondNext(200, """
+                {
+                  "accountId": "acct-balance",
+                  "balance": 125.50,
+                  "currency": "USD"
+                }
+                """);
+
+        mockMvc.perform(get("/accounts/acct-balance/balance")
+                        .header(TraceContext.HEADER_NAME, "trace-balance-001"))
+                .andExpect(status().isOk())
+                .andExpect(header().string(TraceContext.HEADER_NAME, "trace-balance-001"))
+                .andExpect(jsonPath("$.accountId", is("acct-balance")))
+                .andExpect(jsonPath("$.balance", is(125.5)))
+                .andExpect(jsonPath("$.currency", is("USD")));
+
+        assertThat(ACCOUNT_SERVICE.lastTraceId()).isEqualTo("trace-balance-001");
+
+        ACCOUNT_SERVICE.reset();
+        ACCOUNT_SERVICE.failNext(3, 503, """
+                {
+                  "message": "Account Service is unavailable"
+                }
+                """);
+
+        mockMvc.perform(get("/accounts/acct-balance/balance"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath(
+                        "$.message",
+                        is("Account Service is temporarily unavailable")));
+
+        assertThat(ACCOUNT_SERVICE.requestCount()).isEqualTo(3);
     }
 
     @Test
@@ -322,6 +414,9 @@ class EventGatewayApplicationTests {
         private volatile String lastTraceId;
         private volatile int nextStatus = 201;
         private volatile String nextResponse = "{}";
+        private volatile int failuresRemaining;
+        private volatile int failureStatus = 503;
+        private volatile String failureResponse = "{}";
 
         private AccountServiceStub(HttpServer server) {
             this.server = server;
@@ -350,11 +445,25 @@ class EventGatewayApplicationTests {
             lastTraceId = null;
             nextStatus = 201;
             nextResponse = "{}";
+            failuresRemaining = 0;
+            failureStatus = 503;
+            failureResponse = "{}";
         }
 
         synchronized void rejectNext(int status, String response) {
             nextStatus = status;
             nextResponse = response;
+        }
+
+        synchronized void respondNext(int status, String response) {
+            nextStatus = status;
+            nextResponse = response;
+        }
+
+        synchronized void failNext(int count, int status, String response) {
+            failuresRemaining = count;
+            failureStatus = status;
+            failureResponse = response;
         }
 
         int requestCount() {
@@ -383,9 +492,17 @@ class EventGatewayApplicationTests {
             lastTraceId = exchange.getRequestHeaders().getFirst(TraceContext.HEADER_NAME);
             bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
 
-            byte[] response = nextResponse.getBytes(StandardCharsets.UTF_8);
+            int responseStatus = nextStatus;
+            String responseBody = nextResponse;
+            if (failuresRemaining > 0) {
+                failuresRemaining--;
+                responseStatus = failureStatus;
+                responseBody = failureResponse;
+            }
+
+            byte[] response = responseBody.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "application/json");
-            exchange.sendResponseHeaders(nextStatus, response.length);
+            exchange.sendResponseHeaders(responseStatus, response.length);
             exchange.getResponseBody().write(response);
             exchange.close();
 

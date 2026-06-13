@@ -16,6 +16,11 @@ spring:
 
 account-service:
   base-url: ${ACCOUNT_SERVICE_BASE_URL:http://localhost:8081}
+  resilience:
+    connect-timeout: ${ACCOUNT_SERVICE_CONNECT_TIMEOUT:500ms}
+    read-timeout: ${ACCOUNT_SERVICE_READ_TIMEOUT:1s}
+    max-attempts: ${ACCOUNT_SERVICE_MAX_ATTEMPTS:3}
+    initial-backoff: ${ACCOUNT_SERVICE_INITIAL_BACKOFF:100ms}
 
 logging:
   structured:

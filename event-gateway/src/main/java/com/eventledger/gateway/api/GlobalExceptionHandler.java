@@ -5,6 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import com.eventledger.gateway.client.AccountServiceRejectedException;
+import com.eventledger.gateway.client.AccountServiceUnavailableException;
 import com.eventledger.gateway.event.EventNotFoundException;
 
 import jakarta.servlet.http.HttpServletRequest;
@@ -77,6 +78,13 @@ public class GlobalExceptionHandler {
         HttpStatus status = HttpStatus.resolve(exception.getStatus().value());
         HttpStatus responseStatus = status == null ? HttpStatus.BAD_GATEWAY : status;
         return error(responseStatus, exception.getMessage(), request, Map.of());
+    }
+
+    @ExceptionHandler(AccountServiceUnavailableException.class)
+    public ResponseEntity<ApiError> handleAccountServiceUnavailable(
+            AccountServiceUnavailableException exception,
+            HttpServletRequest request) {
+        return error(HttpStatus.SERVICE_UNAVAILABLE, exception.getMessage(), request, Map.of());
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
